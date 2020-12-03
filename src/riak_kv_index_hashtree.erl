@@ -305,16 +305,31 @@ init([Index, VNPid, Opts]) ->
                            path=Path,
                            version=Version},
             IndexNs = responsible_preflists(State),
-            State2 = init_trees(IndexNs, VNEmpty, State),
-            %% If vnode is empty, mark tree as built without performing fold
-            case VNEmpty of
-                true ->
-                    lager:debug("Built empty AAE tree for ~p", [Index]),
-                    gen_server:cast(self(), build_finished);
-                _ ->
-                    ok
-            end,
-            {ok, State2}
+
+            try init_trees(IndexNs, VNEmpty, State) of
+               State2 ->
+                 %% If vnode is empty, mark tree as built without performing fold
+                 case VNEmpty of
+                        true ->
+                             lager:debug("Built empty AAE tree for ~p", [Index]),
+                             gen_server:cast(self(), build_finished);
+                        _ ->
+                             ok
+                 end,
+                 {ok,State2}
+            catch
+                error:Error ->
+                        lager:warning("Error when initialising tree at: ~p. Error: ~p", [Path, Error]),
+						case is_dbopen_error(Error) of
+							true -> 
+								lager:info("Deleting corrupt index tree at: ~p", [Path]),
+								s2_sh:rm_rf(Path);
+							false -> 
+								ok
+						end,
+						%% propagate error up the stack and let higher layer retry it
+                        erlang:error(Error)
+            end
     end.
 
 handle_call({new_tree, Id}, _From, State) ->
@@ -1199,3 +1214,10 @@ maybe_callback(undefined) ->
     ok;
 maybe_callback(Callback) ->
     Callback().
+
+is_dbopen_error(Error) ->
+        try {badmatch,{error,{db_open,_}}}=Error of
+                _ -> true
+        catch
+                _:_ -> false
+        end.
