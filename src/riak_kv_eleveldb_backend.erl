@@ -102,6 +102,10 @@ capabilities(_, _) ->
 %% @doc Start the eleveldb backend
 -spec start(integer(), config()) -> {ok, state()} | {error, term()}.
 start(Partition, Config) ->
+    do_start(Partition, Config, true).
+
+%% Internal function to start db. AttemptRepair flag informs if process should try to repair db if there was a failure during open.
+do_start(Partition, Config, AttemptRepair) ->
     %% Initialize random seed
     random:seed(now()),
 
@@ -115,7 +119,21 @@ start(Partition, Config) ->
         {ok, State} ->
             determine_fixed_index_status(State);
         {error, Reason} ->
-            {error, Reason}
+            lager:warning("Error when opening leveldb: ~s. Error: ~p", [DataDir, Reason]),
+            case (AttemptRepair andalso is_dbopen_error(Reason)) of
+                true ->
+                    case attempt_repair(DataDir) of
+                        ok -> 
+                            lager:info("Repair successful for ~s. Try to open leveldb again", [DataDir]),
+                            do_start(Partition, Config, false);
+                        RepairRes ->
+                            lager:warning("Repair of leveldb for ~s failed with error ~p. Returning original error: ~p", [DataDir, RepairRes, Reason]),
+                            {error, Reason}
+                    end;
+                false ->
+                    lager:warning("Will not attempt to repair leveldb at ~s. Returning error: ~p", [DataDir, Reason]),
+                    {error, Reason}
+            end
     end.
 
 determine_fixed_index_status(State) ->
@@ -913,6 +931,28 @@ from_index_key(LKey) ->
 to_md_key(Key) ->
     sext:encode({md, Key}).
 
+%% Attempt to repair leveldb on a given path by using eleveldb:repair.
+attempt_repair(Path) ->
+    lager:info("Attempt to repair leveldb at ~p", [Path]),
+    Options=[],
+    try eleveldb:repair(Path, Options) of
+        ok ->
+            ok;
+        Res ->
+            {error, Res}
+    catch
+        ErrType:ErrReason ->
+            lager:warning("Exception during repair of ~p. Error ~p, Reason: ~p", [Path, ErrType, ErrReason]),
+            {ErrType,ErrReason}
+    end.
+
+%% Compares given Error to {db_open,_} tuple to determine if it represents a failure to open db.
+is_dbopen_error(Error) ->
+    try {db_open,_} = Error of
+        _ -> true
+    catch
+        _:_ -> false
+    end.
 
 %% ===================================================================
 %% EUnit tests
